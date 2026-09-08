@@ -13,14 +13,14 @@
 Tags named `pi-vX.Y.Z` identify commits compatible with pi version `X.Y.Z`. To install a specific version, replace `X.Y.Z` with the desired pi version:
 
 ```bash
-pi install git:github.com/fxwin/quota-display@pi-vX.Y.Z
+pi install git:github.com/fxwin/pi-quota-display@pi-vX.Y.Z
 ```
 
 ## Setup
 
 1. Install the extension:
    ```bash
-   pi install git:github.com/fxwin/quota-display
+   pi install git:github.com/fxwin/pi-quota-display
    ```
 
 2. Reload pi:
