@@ -2,6 +2,7 @@ import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import * as os from "node:os";
+import { randomUUID } from "node:crypto";
 
 const OPENAI_CODEX_PROVIDER = "openai-codex";
 const GITHUB_COPILOT_PROVIDER = "github-copilot";
@@ -235,6 +236,12 @@ function renderQuota(theme, quotaState, includeBullet = true) {
 	return `${prefix}${parts.join(theme.fg("dim", " | "))}`;
 }
 
+function formatResetExpiration(expiresAt) {
+	const date = new Date(expiresAt);
+	if (Number.isNaN(date.getTime())) return "unknown expiration";
+	return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
 function renderCopilotQuota(theme, copilotQuotaState, includeBullet = true) {
 	const premium = copilotQuotaState?.premiumInteractions;
 	if (!premium || typeof premium.percentRemaining !== "number") return "";
@@ -257,6 +264,7 @@ export default function openaiCodexQuotaExtension(pi) {
 	let quotaState = {
 		windows: [],
 		availableResetCount: undefined,
+		resetCredits: [],
 		lastUpdatedAt: 0,
 		lastError: undefined,
 	};
@@ -314,7 +322,7 @@ export default function openaiCodexQuotaExtension(pi) {
 		usageStats.latestCacheHitRate = promptTokens > 0 ? ((usage.cacheRead || 0) / promptTokens) * 100 : undefined;
 	}
 
-	async function fetchResetCreditCount(apiKey, accountId) {
+	async function fetchResetCredits(apiKey, accountId) {
 		const response = await fetchWithTimeout(RESET_CREDITS_URL, {
 			headers: {
 				Authorization: `Bearer ${apiKey}`,
@@ -330,8 +338,35 @@ export default function openaiCodexQuotaExtension(pi) {
 		}
 
 		const payload = await response.json();
+		const credits = Array.isArray(payload?.credits)
+			? payload.credits.filter((credit) => credit && credit.status === "available" && typeof credit.id === "string")
+			: [];
 		const count = payload?.available_count;
-		return typeof count === "number" && Number.isFinite(count) ? count : undefined;
+		return {
+			availableCount: typeof count === "number" && Number.isFinite(count) ? count : credits.length,
+			credits,
+		};
+	}
+
+	async function consumeResetCredit(apiKey, accountId, creditId) {
+		const response = await fetchWithTimeout(`${RESET_CREDITS_URL}/consume`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
+				"chatgpt-account-id": accountId,
+				originator: "pi",
+				"User-Agent": `pi (${os.platform()} ${os.release()}; ${os.arch()})`,
+				accept: "application/json",
+				"content-type": "application/json",
+			},
+			body: JSON.stringify({ credit_id: creditId, redeem_request_id: randomUUID() }),
+		});
+
+		const body = await response.text().catch(() => "");
+		if (!response.ok) {
+			throw new Error(`OpenAI Codex reset redemption failed (${response.status}): ${body || response.statusText}`);
+		}
+		return body ? JSON.parse(body) : undefined;
 	}
 
 	async function fetchQuota() {
@@ -377,8 +412,11 @@ export default function openaiCodexQuotaExtension(pi) {
 		}
 
 		let availableResetCount;
+		let resetCredits = [];
 		try {
-			availableResetCount = await fetchResetCreditCount(apiKey, accountId);
+			const resetData = await fetchResetCredits(apiKey, accountId);
+			availableResetCount = resetData.availableCount;
+			resetCredits = resetData.credits;
 		} catch (error) {
 			console.warn(`[quota-display] Could not fetch banked Codex resets: ${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -386,6 +424,7 @@ export default function openaiCodexQuotaExtension(pi) {
 		return {
 			windows,
 			availableResetCount,
+			resetCredits,
 			lastUpdatedAt: Date.now(),
 			lastError: undefined,
 		};
@@ -617,6 +656,68 @@ export default function openaiCodexQuotaExtension(pi) {
 			};
 		});
 	}
+
+	pi.registerCommand("quota", {
+		description: "Show Codex quota or redeem a banked reset",
+		handler: async (args, ctx) => {
+			if (args.trim().toLowerCase() !== "reset") {
+				ctx.ui.notify("Codex quota is shown in the footer. Use /quota reset to redeem a banked reset.", "info");
+				return;
+			}
+			if (!isActiveCodexSubscriptionModel(currentModel, modelRegistry)) {
+				ctx.ui.notify("Banked resets are only available for an active Codex subscription model.", "warning");
+				return;
+			}
+			if (!ctx.hasUI) {
+				ctx.ui.notify("/quota reset requires interactive UI confirmation.", "error");
+				return;
+			}
+
+			const credential = getOAuthCredential(OPENAI_CODEX_PROVIDER);
+			const apiKey = typeof credential?.access === "string" ? credential.access : undefined;
+			const accountId = typeof credential?.accountId === "string" ? credential.accountId : undefined;
+			if (!apiKey || !accountId) {
+				ctx.ui.notify("Missing OpenAI Codex OAuth credentials.", "error");
+				return;
+			}
+
+			try {
+				const resetData = await fetchResetCredits(apiKey, accountId);
+				quotaState = { ...quotaState, availableResetCount: resetData.availableCount, resetCredits: resetData.credits };
+				requestFooterRender();
+				if (resetData.credits.length === 0) {
+					ctx.ui.notify("No banked Codex resets are currently available.", "info");
+					return;
+				}
+
+				const creditByOption = new Map(
+					resetData.credits.map((credit) => {
+						const option = `${credit.title || "Codex reset"} — expires ${formatResetExpiration(credit.expires_at)}`;
+						return [option, credit];
+					}),
+				);
+				const selectedOption = await ctx.ui.select("Choose a banked Codex reset", [...creditByOption.keys()]);
+				if (!selectedOption) return;
+				const selectedCredit = creditByOption.get(selectedOption);
+				if (!selectedCredit) return;
+
+				const confirmed = await ctx.ui.confirm(
+					"Redeem Codex reset?",
+					`${selectedCredit.title || "Full reset"}\nExpires ${formatResetExpiration(selectedCredit.expires_at)}\nThis refreshes your 5-hour and weekly Codex limits.`,
+				);
+				if (!confirmed) return;
+
+				await consumeResetCredit(apiKey, accountId, selectedCredit.id);
+				ctx.ui.notify("Codex reset redeemed. Refreshing quota…", "info");
+				const nextQuotaState = await fetchQuota();
+				if (isShuttingDown) return;
+				quotaState = nextQuotaState;
+				requestFooterRender();
+			} catch (error) {
+				ctx.ui.notify(`Could not redeem Codex reset: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		},
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		isShuttingDown = false;
