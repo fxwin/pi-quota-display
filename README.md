@@ -4,10 +4,11 @@
 
 ## Features
 
-- shows available Codex quota windows (for example 5h and/or weekly), including reset countdowns
+- shows available Codex quota windows (for example 5h and/or weekly)
+- shows the number of banked Codex resets when available
 - shows GitHub Copilot monthly quota as used vs. goal
 - uses your existing pi `/login`
-- keeps the Codex reset countdown current in the footer
+- keeps the weekly Codex reset countdown current in the footer
 
 ## Compatibility
 

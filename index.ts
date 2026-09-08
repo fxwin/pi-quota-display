@@ -6,6 +6,7 @@ import * as os from "node:os";
 const OPENAI_CODEX_PROVIDER = "openai-codex";
 const GITHUB_COPILOT_PROVIDER = "github-copilot";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const USER_INFO_API_VERSION = "2026-06-01";
 const REFRESH_RENDER_INTERVAL_MS = 60_000;
 const COPILOT_HEADERS = {
@@ -217,14 +218,18 @@ function renderQuota(theme, quotaState, includeBullet = true) {
 	const windows = Array.isArray(quotaState?.windows) ? quotaState.windows : [];
 	if (!windows.length) return "";
 
-	const parts = windows.map((window) => {
+	const parts = [];
+	if (typeof quotaState.availableResetCount === "number") {
+		parts.push(`resets ${quotaState.availableResetCount}`);
+	}
+	parts.push(...windows.map((window) => {
 		const color = getWindowColor(window.limitWindowSeconds, window.usedPercent);
 		const label = window.label || getWindowLabel(window.limitWindowSeconds);
 		const resetText = isShortQuotaWindow(window.limitWindowSeconds)
-			? `${formatResetTime(window.resetAtMs)}, in ${formatRemainingTime(window.resetAtMs)}`
+			? formatResetTime(window.resetAtMs)
 			: `in ${formatRemainingTime(window.resetAtMs)}`;
 		return colorQuotaLabel(theme, color, `${label} ${formatPercent(window.usedPercent)}`) + theme.fg("dim", ` (${resetText})`);
-	});
+	}));
 
 	const prefix = includeBullet ? theme.fg("dim", " • ") : "";
 	return `${prefix}${parts.join(theme.fg("dim", " | "))}`;
@@ -251,6 +256,7 @@ export default function openaiCodexQuotaExtension(pi) {
 	let modelRegistry;
 	let quotaState = {
 		windows: [],
+		availableResetCount: undefined,
 		lastUpdatedAt: 0,
 		lastError: undefined,
 	};
@@ -308,6 +314,26 @@ export default function openaiCodexQuotaExtension(pi) {
 		usageStats.latestCacheHitRate = promptTokens > 0 ? ((usage.cacheRead || 0) / promptTokens) * 100 : undefined;
 	}
 
+	async function fetchResetCreditCount(apiKey, accountId) {
+		const response = await fetchWithTimeout(RESET_CREDITS_URL, {
+			headers: {
+				Authorization: `Bearer ${apiKey}`,
+				"chatgpt-account-id": accountId,
+				originator: "pi",
+				"User-Agent": `pi (${os.platform()} ${os.release()}; ${os.arch()})`,
+				accept: "application/json",
+			},
+		});
+
+		if (!response.ok) {
+			throw new Error(`OpenAI Codex reset credits request failed (${response.status})`);
+		}
+
+		const payload = await response.json();
+		const count = payload?.available_count;
+		return typeof count === "number" && Number.isFinite(count) ? count : undefined;
+	}
+
 	async function fetchQuota() {
 		const credential = getOAuthCredential(OPENAI_CODEX_PROVIDER);
 		const apiKey = typeof credential?.access === "string" ? credential.access : undefined;
@@ -350,8 +376,16 @@ export default function openaiCodexQuotaExtension(pi) {
 			throw new Error(`Unexpected OpenAI Codex usage payload: ${JSON.stringify(payload)}`);
 		}
 
+		let availableResetCount;
+		try {
+			availableResetCount = await fetchResetCreditCount(apiKey, accountId);
+		} catch (error) {
+			console.warn(`[quota-display] Could not fetch banked Codex resets: ${error instanceof Error ? error.message : String(error)}`);
+		}
+
 		return {
 			windows,
+			availableResetCount,
 			lastUpdatedAt: Date.now(),
 			lastError: undefined,
 		};
