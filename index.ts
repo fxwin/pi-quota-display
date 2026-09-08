@@ -582,9 +582,6 @@ export default function openaiCodexQuotaExtension(pi) {
 					let left = statsParts.join(" ");
 
 					let modelText = currentModel?.id || "no-model";
-					const extensionStatuses = footerData.getExtensionStatuses();
-					const webSearchStatus = extensionStatuses.get("web-search");
-					if (webSearchStatus) modelText = `${webSearchStatus} • ${modelText}`;
 					if (currentModel?.reasoning) {
 						modelText = thinkingLevel === "off" ? `${modelText} • thinking off` : `${modelText} • ${thinkingLevel}`;
 					}
@@ -645,11 +642,9 @@ export default function openaiCodexQuotaExtension(pi) {
 
 					const lines = [pathLine, theme.fg("dim", left) + theme.fg("dim", statsLine.slice(left.length))];
 
-					const otherExtensionStatuses = new Map(
-						[...extensionStatuses].filter(([id]) => id !== "web-search"),
-					);
-					if (otherExtensionStatuses.size > 0) {
-						const statusLine = Array.from(otherExtensionStatuses.entries())
+					const extensionStatuses = footerData.getExtensionStatuses();
+					if (extensionStatuses.size > 0) {
+						const statusLine = Array.from(extensionStatuses.entries())
 							.sort(([a], [b]) => a.localeCompare(b))
 							.map(([, text]) => sanitizeStatusText(text))
 							.join(" ");
