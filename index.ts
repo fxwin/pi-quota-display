@@ -221,8 +221,8 @@ function renderQuota(theme, quotaState, includeBullet = true) {
 		const color = getWindowColor(window.limitWindowSeconds, window.usedPercent);
 		const label = window.label || getWindowLabel(window.limitWindowSeconds);
 		const resetText = isShortQuotaWindow(window.limitWindowSeconds)
-			? formatResetTime(window.resetAtMs)
-			: formatRemainingTime(window.resetAtMs);
+			? `${formatResetTime(window.resetAtMs)}, in ${formatRemainingTime(window.resetAtMs)}`
+			: `in ${formatRemainingTime(window.resetAtMs)}`;
 		return colorQuotaLabel(theme, color, `${label} ${formatPercent(window.usedPercent)}`) + theme.fg("dim", ` (${resetText})`);
 	});
 
@@ -480,7 +480,7 @@ export default function openaiCodexQuotaExtension(pi) {
 			const requestRender = () => tui.requestRender();
 			requestRenderCallbacks.add(requestRender);
 			const unsubscribe = footerData.onBranchChange(requestRender);
-			const timer = setInterval(requestRender, REFRESH_RENDER_INTERVAL_MS);
+			const timer = setInterval(requestRender, 1000);
 
 			return {
 				dispose() {
