@@ -33,3 +33,12 @@ pi install git:github.com/fxwin/pi-quota-display@pi-vX.Y.Z
 3. Make sure you're logged in with `/login` for one or both of:
    - ChatGPT Plus/Pro (Codex Subscription)
    - GitHub Copilot
+
+## Commands
+
+```text
+/quota
+/quota reset
+```
+
+`/quota reset` refreshes the available banked resets, lets you choose one by expiration date, asks for confirmation, and then refreshes the displayed quota.
