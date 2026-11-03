@@ -4,7 +4,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import * as os from "node:os";
 import { randomUUID } from "node:crypto";
 
-const OPENAI_CODEX_PROVIDER = "openai-codex";
+const OPENAI_SUBSCRIPTION_PROVIDERS = new Set(["openai-codex", "openai"]);
 const GITHUB_COPILOT_PROVIDER = "github-copilot";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
@@ -100,7 +100,7 @@ function calculateThinkingLevel(sessionManager) {
 }
 
 function isActiveCodexSubscriptionModel(currentModel, modelRegistry) {
-	if (!currentModel || currentModel.provider !== OPENAI_CODEX_PROVIDER) return false;
+	if (!currentModel || !OPENAI_SUBSCRIPTION_PROVIDERS.has(currentModel.provider)) return false;
 	return modelRegistry ? modelRegistry.isUsingOAuth(currentModel) : true;
 }
 
@@ -175,6 +175,13 @@ function getOAuthCredential(provider) {
 	return credential?.type === "oauth" ? credential : undefined;
 }
 
+function getQuotaCredential(provider) {
+	const active = getOAuthCredential(provider);
+	if (active?.access && active.accountId) return active;
+	const fallback = provider === "openai" ? getOAuthCredential("openai-codex") : undefined;
+	return fallback?.access && fallback.accountId ? fallback : undefined;
+}
+
 function getApiUrl(serverUrl) {
 	if (serverUrl === "https://github.com") return "https://api.github.com";
 	return serverUrl.includes("://api.") ? serverUrl : serverUrl.replace("://", "://api.");
@@ -216,6 +223,8 @@ function getCopilotGoalPercent(quotaResetDate) {
 }
 
 function renderQuota(theme, quotaState, includeBullet = true) {
+	const prefix = includeBullet ? theme.fg("dim", " • ") : "";
+	if (quotaState?.lastError) return `${prefix}${theme.fg("warning", "quota unavailable")}`;
 	const windows = Array.isArray(quotaState?.windows) ? quotaState.windows : [];
 	if (!windows.length) return "";
 
@@ -232,7 +241,6 @@ function renderQuota(theme, quotaState, includeBullet = true) {
 		return colorQuotaLabel(theme, color, `${label} ${formatPercent(window.usedPercent)}`) + theme.fg("dim", ` (${resetText})`);
 	}));
 
-	const prefix = includeBullet ? theme.fg("dim", " • ") : "";
 	return `${prefix}${parts.join(theme.fg("dim", " | "))}`;
 }
 
@@ -370,12 +378,12 @@ export default function openaiCodexQuotaExtension(pi) {
 	}
 
 	async function fetchQuota() {
-		const credential = getOAuthCredential(OPENAI_CODEX_PROVIDER);
+		const credential = getQuotaCredential(currentModel.provider);
 		const apiKey = typeof credential?.access === "string" ? credential.access : undefined;
 		const accountId = typeof credential?.accountId === "string" ? credential.accountId : undefined;
 
 		if (!apiKey || !accountId) {
-			throw new Error("Missing OpenAI Codex OAuth credentials");
+			throw new Error("Missing OpenAI Codex OAuth credentials. Run /login openai-codex; the newer openai login cannot query Codex usage.");
 		}
 
 		const response = await fetchWithTimeout(USAGE_URL, {
@@ -661,7 +669,8 @@ export default function openaiCodexQuotaExtension(pi) {
 		description: "Show Codex quota or redeem a banked reset",
 		handler: async (args, ctx) => {
 			if (args.trim().toLowerCase() !== "reset") {
-				ctx.ui.notify("Codex quota is shown in the footer. Use /quota reset to redeem a banked reset.", "info");
+				const details = quotaState.lastError || "Codex quota is shown in the footer.";
+				ctx.ui.notify(`${details} Use /quota reset to redeem a banked reset.`, quotaState.lastError ? "warning" : "info");
 				return;
 			}
 			if (!isActiveCodexSubscriptionModel(currentModel, modelRegistry)) {
@@ -673,11 +682,11 @@ export default function openaiCodexQuotaExtension(pi) {
 				return;
 			}
 
-			const credential = getOAuthCredential(OPENAI_CODEX_PROVIDER);
+			const credential = getQuotaCredential(currentModel.provider);
 			const apiKey = typeof credential?.access === "string" ? credential.access : undefined;
 			const accountId = typeof credential?.accountId === "string" ? credential.accountId : undefined;
 			if (!apiKey || !accountId) {
-				ctx.ui.notify("Missing OpenAI Codex OAuth credentials.", "error");
+				ctx.ui.notify("Missing OpenAI Codex OAuth credentials. Run /login openai-codex; the newer openai login cannot query Codex usage.", "error");
 				return;
 			}
 
