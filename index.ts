@@ -330,16 +330,89 @@ export default function openaiCodexQuotaExtension(pi) {
 		usageStats.latestCacheHitRate = promptTokens > 0 ? ((usage.cacheRead || 0) / promptTokens) * 100 : undefined;
 	}
 
-	async function fetchResetCredits(apiKey, accountId) {
-		const response = await fetchWithTimeout(RESET_CREDITS_URL, {
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
-				"chatgpt-account-id": accountId,
-				originator: "pi",
-				"User-Agent": `pi (${os.platform()} ${os.release()}; ${os.arch()})`,
-				accept: "application/json",
-			},
-		});
+	const CODEX_ACCESS_MAX_AGE_MS = 8 * 24 * 60 * 60 * 1000;
+
+	function tokenIssuedAtMs(access) {
+		try {
+			const payload = access.split(".")[1];
+			if (!payload) return undefined;
+			const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+			return typeof claims.iat === "number" ? claims.iat * 1000 : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	function credentialNeedsRefresh(credential) {
+		if (!credential || credential.type !== "oauth" || typeof credential.refresh !== "string" || typeof credential.access !== "string") {
+			return true;
+		}
+		if (typeof credential.expires === "number" && credential.expires <= Date.now() + 60_000) return true;
+		const issuedAt = tokenIssuedAtMs(credential.access);
+		return typeof issuedAt === "number" && Date.now() - issuedAt >= CODEX_ACCESS_MAX_AGE_MS;
+	}
+
+	function authFromCredential(credential) {
+		const apiKey = typeof credential?.access === "string" ? credential.access : undefined;
+		const accountId = typeof credential?.accountId === "string" ? credential.accountId : undefined;
+		if (!apiKey || !accountId) {
+			throw new Error("OpenAI login session could not provide a Codex quota token. Run /login openai-codex.");
+		}
+		return { apiKey, accountId };
+	}
+
+	function quotaProviderId() {
+		const provider = currentModel?.provider;
+		if (provider && getOAuthCredential(provider)?.refresh) return provider;
+		if (provider === "openai" || !provider) return "openai-codex";
+		return provider;
+	}
+
+	async function refreshQuotaCredential(force = false, rejectedAccess) {
+		const providerId = quotaProviderId();
+		const oauth = modelRegistry?.getProvider?.(providerId)?.auth?.oauth;
+		const credentials = modelRegistry?.runtime?.credentials;
+		if (oauth?.refresh && credentials?.modify) {
+			const refreshed = await credentials.modify(providerId, async (current) => {
+				if (!current || current.type !== "oauth" || typeof current.refresh !== "string") {
+					throw new Error("OpenAI login session is missing. Run /login openai-codex.");
+				}
+				if (!force && !credentialNeedsRefresh(current)) return undefined;
+				if (force && rejectedAccess && current.access !== rejectedAccess) return undefined;
+				const next = await oauth.refresh(current, AbortSignal.timeout(15_000));
+				return next?.type === "oauth" ? next : { ...current, ...next, type: "oauth" };
+			});
+			return authFromCredential(refreshed?.type === "oauth" ? refreshed : getOAuthCredential(providerId));
+		}
+
+		if (!force && modelRegistry?.getProviderAuth) {
+			await modelRegistry.getProviderAuth(providerId);
+		}
+		return authFromCredential(getOAuthCredential(providerId) || getQuotaCredential(currentModel?.provider));
+	}
+
+	async function codexFetch(url, options = {}) {
+		const send = (auth) =>
+			fetchWithTimeout(url, {
+				...options,
+				headers: {
+					...options.headers,
+					Authorization: `Bearer ${auth.apiKey}`,
+					"chatgpt-account-id": auth.accountId,
+					originator: "pi",
+					"User-Agent": `pi (${os.platform()} ${os.release()}; ${os.arch()})`,
+					accept: "application/json",
+				},
+			});
+
+		const auth = await refreshQuotaCredential(false);
+		const response = await send(auth);
+		if (response.status !== 401) return response;
+		return send(await refreshQuotaCredential(true, auth.apiKey));
+	}
+
+	async function fetchResetCredits() {
+		const response = await codexFetch(RESET_CREDITS_URL);
 
 		if (!response.ok) {
 			throw new Error(`OpenAI Codex reset credits request failed (${response.status})`);
@@ -356,17 +429,10 @@ export default function openaiCodexQuotaExtension(pi) {
 		};
 	}
 
-	async function consumeResetCredit(apiKey, accountId, creditId) {
-		const response = await fetchWithTimeout(`${RESET_CREDITS_URL}/consume`, {
+	async function consumeResetCredit(creditId) {
+		const response = await codexFetch(`${RESET_CREDITS_URL}/consume`, {
 			method: "POST",
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
-				"chatgpt-account-id": accountId,
-				originator: "pi",
-				"User-Agent": `pi (${os.platform()} ${os.release()}; ${os.arch()})`,
-				accept: "application/json",
-				"content-type": "application/json",
-			},
+			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ credit_id: creditId, redeem_request_id: randomUUID() }),
 		});
 
@@ -378,23 +444,7 @@ export default function openaiCodexQuotaExtension(pi) {
 	}
 
 	async function fetchQuota() {
-		const credential = getQuotaCredential(currentModel.provider);
-		const apiKey = typeof credential?.access === "string" ? credential.access : undefined;
-		const accountId = typeof credential?.accountId === "string" ? credential.accountId : undefined;
-
-		if (!apiKey || !accountId) {
-			throw new Error("Missing OpenAI Codex OAuth credentials. Run /login openai-codex; the newer openai login cannot query Codex usage.");
-		}
-
-		const response = await fetchWithTimeout(USAGE_URL, {
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
-				"chatgpt-account-id": accountId,
-				originator: "pi",
-				"User-Agent": `pi (${os.platform()} ${os.release()}; ${os.arch()})`,
-				accept: "application/json",
-			},
-		});
+		const response = await codexFetch(USAGE_URL);
 
 		if (!response.ok) {
 			const body = await response.text().catch(() => "");
@@ -422,7 +472,7 @@ export default function openaiCodexQuotaExtension(pi) {
 		let availableResetCount;
 		let resetCredits = [];
 		try {
-			const resetData = await fetchResetCredits(apiKey, accountId);
+			const resetData = await fetchResetCredits();
 			availableResetCount = resetData.availableCount;
 			resetCredits = resetData.credits;
 		} catch (error) {
@@ -682,16 +732,8 @@ export default function openaiCodexQuotaExtension(pi) {
 				return;
 			}
 
-			const credential = getQuotaCredential(currentModel.provider);
-			const apiKey = typeof credential?.access === "string" ? credential.access : undefined;
-			const accountId = typeof credential?.accountId === "string" ? credential.accountId : undefined;
-			if (!apiKey || !accountId) {
-				ctx.ui.notify("Missing OpenAI Codex OAuth credentials. Run /login openai-codex; the newer openai login cannot query Codex usage.", "error");
-				return;
-			}
-
 			try {
-				const resetData = await fetchResetCredits(apiKey, accountId);
+				const resetData = await fetchResetCredits();
 				quotaState = { ...quotaState, availableResetCount: resetData.availableCount, resetCredits: resetData.credits };
 				requestFooterRender();
 				if (resetData.credits.length === 0) {
@@ -716,7 +758,7 @@ export default function openaiCodexQuotaExtension(pi) {
 				);
 				if (!confirmed) return;
 
-				await consumeResetCredit(apiKey, accountId, selectedCredit.id);
+				await consumeResetCredit(selectedCredit.id);
 				ctx.ui.notify("Codex reset redeemed. Refreshing quota…", "info");
 				const nextQuotaState = await fetchQuota();
 				if (isShuttingDown) return;

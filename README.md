@@ -23,7 +23,7 @@
    ```
 
 3. Log in to the providers you use:
-   - For OpenAI quota, run `/login openai-codex` and sign in to your ChatGPT account. This separate Codex login is required even when your active model uses the `openai` provider with Sign in with ChatGPT: the newer `openai` credential cannot access the Codex quota endpoint. Use the same ChatGPT account for both logins.
+   - For OpenAI quota, run `/login openai-codex` and sign in to your ChatGPT account. If that access token expires while the login session is still valid, the extension refreshes it automatically. Log in again only if the refresh fails.
    - For GitHub Copilot quota, run `/login github-copilot`.
 
 ## Provider-specific quota
