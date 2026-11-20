@@ -4,7 +4,8 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import * as os from "node:os";
 import { randomUUID } from "node:crypto";
 
-const OPENAI_SUBSCRIPTION_PROVIDERS = new Set(["openai-codex", "openai"]);
+const CODEX_QUOTA_PROVIDER = "openai-codex";
+const OPENAI_SUBSCRIPTION_PROVIDERS = new Set([CODEX_QUOTA_PROVIDER, "openai"]);
 const GITHUB_COPILOT_PROVIDER = "github-copilot";
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
@@ -175,11 +176,21 @@ function getOAuthCredential(provider) {
 	return credential?.type === "oauth" ? credential : undefined;
 }
 
-function getQuotaCredential(provider) {
-	const active = getOAuthCredential(provider);
-	if (active?.access && active.accountId) return active;
-	const fallback = provider === "openai" ? getOAuthCredential("openai-codex") : undefined;
-	return fallback?.access && fallback.accountId ? fallback : undefined;
+function getQuotaCredential() {
+	const credential = getOAuthCredential(CODEX_QUOTA_PROVIDER);
+	return credential?.access && credential.accountId ? credential : undefined;
+}
+
+function planWindows(rateLimit) {
+	return [rateLimit?.primary_window, rateLimit?.secondary_window]
+		.filter((window) => window && typeof window === "object")
+		.map((window) => ({
+			label: getWindowLabel(window.limit_window_seconds),
+			usedPercent: Number(window.used_percent || 0),
+			resetAtMs: Number(window.reset_at || 0) * 1000,
+			limitWindowSeconds: Number(window.limit_window_seconds || 0),
+		}))
+		.filter((window) => Number.isFinite(window.usedPercent) && Number.isFinite(window.resetAtMs));
 }
 
 function getApiUrl(serverUrl) {
@@ -362,10 +373,7 @@ export default function openaiCodexQuotaExtension(pi) {
 	}
 
 	function quotaProviderId() {
-		const provider = currentModel?.provider;
-		if (provider && getOAuthCredential(provider)?.refresh) return provider;
-		if (provider === "openai" || !provider) return "openai-codex";
-		return provider;
+		return CODEX_QUOTA_PROVIDER;
 	}
 
 	async function refreshQuotaCredential(force = false, rejectedAccess) {
@@ -388,7 +396,7 @@ export default function openaiCodexQuotaExtension(pi) {
 		if (!force && modelRegistry?.getProviderAuth) {
 			await modelRegistry.getProviderAuth(providerId);
 		}
-		return authFromCredential(getOAuthCredential(providerId) || getQuotaCredential(currentModel?.provider));
+		return authFromCredential(getOAuthCredential(providerId) || getQuotaCredential());
 	}
 
 	async function codexFetch(url, options = {}) {
@@ -452,19 +460,7 @@ export default function openaiCodexQuotaExtension(pi) {
 		}
 
 		const payload = await response.json();
-		const windows = [
-			payload?.rate_limit?.primary_window,
-			payload?.rate_limit?.secondary_window,
-		]
-			.filter((window) => window && typeof window === "object")
-			.map((window) => ({
-				label: getWindowLabel(window.limit_window_seconds),
-				usedPercent: Number(window.used_percent || 0),
-				resetAtMs: Number(window.reset_at || 0) * 1000,
-				limitWindowSeconds: Number(window.limit_window_seconds || 0),
-			}))
-			.filter((window) => Number.isFinite(window.usedPercent) && Number.isFinite(window.resetAtMs))
-			.sort((a, b) => a.limitWindowSeconds - b.limitWindowSeconds);
+		const windows = planWindows(payload?.rate_limit).sort((a, b) => a.limitWindowSeconds - b.limitWindowSeconds);
 		if (!windows.length) {
 			throw new Error(`Unexpected OpenAI Codex usage payload: ${JSON.stringify(payload)}`);
 		}

@@ -23,14 +23,18 @@
    ```
 
 3. Log in to the providers you use:
-   - For OpenAI quota, run `/login openai-codex` and sign in to your ChatGPT account. If that access token expires while the login session is still valid, the extension refreshes it automatically. Log in again only if the refresh fails.
+   - For OpenAI quota, run `/login openai-codex` and sign in to your ChatGPT account. That login is what the usage endpoint accepts for both `openai-codex` and `openai` models. If that access token expires while the login session is still valid, the extension refreshes it automatically. Log in again only if the refresh fails.
    - For GitHub Copilot quota, run `/login github-copilot`.
 
 ## Provider-specific quota
 
-The footer displays quota for the active model's provider, not all logged-in accounts at once. For an OAuth model under `openai-codex` or `openai`, it shows the **Codex quota** associated with the `openai-codex` login. For an OAuth model under `github-copilot`, it shows that Copilot account's monthly premium-interaction quota. API-key models and other providers do not show subscription quota.
+The footer displays quota for the active model's provider, not all logged-in accounts at once.
 
-The `openai` display uses the Codex quota endpoint; it should not be assumed to represent every limit associated with the newer Sign in with ChatGPT integration. If no Codex login is available, use `/quota` to see the error.
+- An OAuth model under `openai-codex` or `openai` shows the 5-hour and weekly Codex windows from the `openai-codex` login, plus banked resets. Sign in with ChatGPT tokens are rejected by the usage endpoint, so `openai` models use that same Codex login.
+- An OAuth model under `github-copilot` shows that Copilot account's monthly premium-interaction quota.
+- API-key models and other providers do not show subscription quota.
+
+Both OpenAI providers need `/login openai-codex`. If no Codex login is available, use `/quota` to see the error.
 
 ## Commands
 
